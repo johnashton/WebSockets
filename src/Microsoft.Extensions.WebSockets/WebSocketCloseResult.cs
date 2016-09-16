@@ -1,8 +1,18 @@
 ﻿namespace Microsoft.Extensions.WebSockets
 {
-    public class WebSocketCloseResult
+    /// <summary>
+    /// Represents the payload of a Close frame (i.e. a <see cref="WebSocketFrame"/> with an <see cref="WebSocketFrame.Opcode"/> of <see cref="WebSocketOpcode.Close"/>).
+    /// </summary>
+    public struct WebSocketCloseResult
     {
-        public WebSocketCloseStatus? CloseStatus { get; }
-        public string CloseStatusDescription { get; }
+        /// <summary>
+        /// Gets the close status code specified in the frame.
+        /// </summary>
+        public WebSocketCloseStatus Status { get; }
+
+        /// <summary>
+        /// Gets the close status description specified in the frame.
+        /// </summary>
+        public string Description { get; }
     }
 }

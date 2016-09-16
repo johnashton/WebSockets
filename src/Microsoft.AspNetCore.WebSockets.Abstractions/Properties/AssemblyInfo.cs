@@ -5,5 +5,5 @@
 // associated with an assembly.
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("Microsoft.Extensions.WebSockets")]
+[assembly: AssemblyProduct("Microsoft.AspNetCore.WebSockets.Abstractions")]
 [assembly: AssemblyTrademark("")]
