@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -37,6 +38,17 @@ namespace Microsoft.Extensions.WebSockets.Internal
         }
 
         /// <summary>
+        /// Intended only to support testing and internal infrastructure. Do not use unless you really know what you're doing.
+        /// </summary>
+        /// <param name="connection"></param>
+        /// <param name="subProtocol"></param>
+        public WebSocketConnection(AwaitableStream connection, string subProtocol)
+        {
+            SubProtocol = subProtocol;
+            _connection = connection;
+        }
+
+        /// <summary>
         /// Receives the next available frame.
         /// </summary>
         /// <param name="cancellationToken">A <see cref="CancellationToken"/> that indicates when/if the receive is cancelled.</param>
@@ -44,7 +56,7 @@ namespace Microsoft.Extensions.WebSockets.Internal
         // TODO: De-taskify this to allow consumers to create their own awaiter.
         public async Task<WebSocketFrame> ReceiveAsync(CancellationToken cancellationToken)
         {
-            // WebSocket Frame layout:
+            // WebSocket Frame layout (https://tools.ietf.org/html/rfc6455#section-5.2):
             //      0                   1                   2                   3
             //      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
             //     +-+-+-+-+-------+-+-------------+-------------------------------+
@@ -65,88 +77,132 @@ namespace Microsoft.Extensions.WebSockets.Internal
             //     +---------------------------------------------------------------+
 
             var nextField = NextField.Opcode;
-            var header = new WebSocketFrameHeader();
-            byte[] payload = null;
-            var remainingPayloadBytes = 0;
-            var maskOffset = 0;
-            WebSocketFrame completedFrame = null;
-            while (completedFrame == null)
+            var state = new ParseState();
+            while (nextField != NextField.Complete)
             {
-                if (_activeBuffer.IsEmpty)
+                if(state.BufferOffset >= _activeBuffer.Length)
                 {
                     _activeBuffer = await _connection.ReadAsync();
+                    state.BufferOffset = 0;
                 }
 
-                // Read the header
-                if (nextField != NextField.Payload)
+                var startOffset = state.BufferOffset;
+                while(nextField != NextField.Complete && state.BufferOffset < _activeBuffer.Length)
                 {
-                    var consumed = 0;
-                    foreach (var segment in _activeBuffer)
-                    {
-                        foreach (var byt in segment)
-                        {
-                            switch (nextField)
-                            {
-                                case NextField.Opcode:
-                                    header.Fin = (byt & 0x1) != 0;
-                                    header.Opcode = (WebSocketOpcode)((byt & 0xF0) << 4);
-
-                                    nextField = NextField.MaskedAndLen;
-                                    consumed++;
-                                    break;
-                                case NextField.MaskedAndLen:
-                                    header.Masked = (byt & 0x1) != 0;
-                                    var len = (byt & 0xFE) << 1;
-                                    if (len == 127)
-                                    {
-                                        remainingPayloadBytes = 8;
-                                        nextField = NextField.ExtendedLen;
-                                    }
-                                    else if (len == 126)
-                                    {
-                                        remainingPayloadBytes = 2;
-                                        nextField = NextField.ExtendedLen;
-                                    }
-                                    else
-                                    {
-                                        header.PayloadLength = len;
-                                        nextField = header.Masked ? NextField.MaskingKey : NextField.Payload;
-                                    }
-                                    consumed++;
-                                    break;
-                                case NextField.ExtendedLen:
-                                    // Add the byte to the value
-                                    header.PayloadLength = (header.PayloadLength << 8) + byt;
-                                    remainingPayloadBytes--;
-                                    if (remainingPayloadBytes == 0)
-                                    {
-                                        nextField = header.Masked ? NextField.MaskingKey : NextField.Payload;
-                                    }
-                                    consumed++;
-                                    break;
-                                case NextField.MaskingKey:
-                                    if (header.MaskingKey == null)
-                                    {
-                                        header.MaskingKey = new byte[4];
-                                    }
-                                    header.MaskingKey[maskOffset] = byt;
-                                    maskOffset++;
-                                    if (maskOffset == 4)
-                                    {
-                                        nextField = NextField.Payload;
-                                    }
-                                    consumed++;
-                                    break;
-                                default:
-                                    throw new InvalidOperationException("Invalid state!");
-                            }
-                        }
-                    }
-                    _connection.Consumed(consumed);
-                    _activeBuffer = _activeBuffer.Slice(consumed);
+                    nextField = ParseNextField(nextField, ref state);
                 }
+                _connection.Consumed(state.BufferOffset - startOffset);
             }
-            return completedFrame;
+
+            Debug.Assert(state.Frame != null);
+
+            // Save the rest (if any) for later
+            _activeBuffer = _activeBuffer.Slice(state.BufferOffset);
+            return state.Frame;
+        }
+
+        private NextField ParseNextField(NextField currentField, ref ParseState state)
+        {
+            switch (currentField)
+            {
+                case NextField.Opcode: return ParseOpcode(ref state);
+                case NextField.MaskedAndLen: return ParseMaskedAndLen(ref state);
+                case NextField.ExtendedLen: return ParseExtendedLength(ref state);
+                case NextField.MaskingKey: return ParseMaskingKey(ref state);
+                case NextField.Payload: return ParsePayload(ref state);
+                default:
+                    throw new InvalidOperationException("Unexpected state: " + currentField.ToString());
+            }
+        }
+
+        private NextField ParsePayload(ref ParseState state)
+        {
+            var bytesToRead = (int)Math.Min(_activeBuffer.Length - state.BufferOffset, state.PayloadLength);
+            state.Payload = ByteBuffer.Concat(state.Payload, _activeBuffer.Slice(state.BufferOffset, bytesToRead));
+            state.BufferOffset += bytesToRead;
+            state.PayloadLength -= bytesToRead;
+
+            if(state.PayloadLength == 0)
+            {
+                // We've read it all, we're done!
+                // TODO: Unmasking
+                // TODO: Close payload
+                // TODO: Work out how we actually want to propagate the payload, doing it this way will often force a copy
+                state.Frame = new WebSocketFrame(state.Fin, state.Opcode, state.Payload.GetArraySegment());
+                return NextField.Complete;
+            }
+            else
+            {
+                return NextField.Payload;
+            }
+        }
+
+        private NextField ParseMaskingKey(ref ParseState state)
+        {
+            var bytesLeft = 4 - state.MaskingKey.Length;
+            var bytesToRead = (int)Math.Min(_activeBuffer.Length - state.BufferOffset, bytesLeft);
+            state.MaskingKey = ByteBuffer.Concat(state.MaskingKey, _activeBuffer.Slice(state.BufferOffset, bytesToRead));
+            state.BufferOffset += bytesToRead;
+
+            if (state.MaskingKey.Length == 4)
+            {
+                return NextField.Payload;
+            }
+            else
+            {
+                return NextField.MaskingKey;
+            }
+        }
+
+        private NextField ParseExtendedLength(ref ParseState state)
+        {
+            var byt = _activeBuffer[state.BufferOffset];
+            state.BufferOffset += 1;
+
+            state.PayloadLength = (state.PayloadLength << 8) + byt;
+            state.LengthSizeInBytes--;
+            if (state.LengthSizeInBytes == 0)
+            {
+                return state.Masked ? NextField.MaskingKey : NextField.Payload;
+            }
+            else
+            {
+                return NextField.ExtendedLen;
+            }
+        }
+
+        private NextField ParseMaskedAndLen(ref ParseState state)
+        {
+            var byt = _activeBuffer[state.BufferOffset];
+            state.BufferOffset += 1;
+
+            state.Masked = (byt & 0x01) != 0;
+            var len = (byt & 0xFE) >> 1;
+            if (len == 127)
+            {
+                state.LengthSizeInBytes = 8;
+                return NextField.ExtendedLen;
+            }
+            else if (len == 126)
+            {
+                state.LengthSizeInBytes = 2;
+                return NextField.ExtendedLen;
+            }
+            else
+            {
+                state.PayloadLength = len;
+                return state.Masked ? NextField.MaskingKey : NextField.Payload;
+            }
+        }
+
+        private NextField ParseOpcode(ref ParseState state)
+        {
+            var byt = _activeBuffer[state.BufferOffset];
+            state.BufferOffset += 1;
+
+            state.Fin = (byt & 0x01) != 0;
+            state.Opcode = (WebSocketOpcode)((byt & 0xF0) >> 4);
+            return NextField.MaskedAndLen;
         }
 
         private enum NextField
@@ -155,16 +211,21 @@ namespace Microsoft.Extensions.WebSockets.Internal
             Payload,
             MaskedAndLen,
             ExtendedLen,
-            MaskingKey
+            MaskingKey,
+            Complete
         }
 
-        private struct WebSocketFrameHeader
+        private struct ParseState
         {
             public bool Fin;
             public WebSocketOpcode Opcode;
             public long PayloadLength;
             public bool Masked;
-            public byte[] MaskingKey; // TODO: Slice ByteBuffer?
+            public ByteBuffer MaskingKey;
+            public ByteBuffer Payload;
+            public int BufferOffset;
+            public int LengthSizeInBytes;
+            public WebSocketFrame Frame;
         }
 
         /// <summary>

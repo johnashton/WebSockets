@@ -13,6 +13,7 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
         private readonly BufferSegment _head;
         private readonly BufferSegment _tail;
         private readonly ArraySegment<byte> _data;
+        private int? _length;
 
         public bool IsEmpty => (_head == null && _data.Count == 0) || (_head == _tail && (_head?.Buffer.Count == 0));
 
@@ -22,22 +23,54 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
         {
             get
             {
-                // TODO: Cache
-                int length = 0;
-                var segment = _head;
-
-                if (segment == null)
+                // Shortcut
+                if(IsEmpty)
                 {
-                    return _data.Count;
+                    return 0;
                 }
 
-                do
+                if (_length == null)
                 {
-                    length += segment.Buffer.Count;
-                    segment = segment.Next;
-                } while (segment != null);
+                    // TODO: Cache
+                    int length = 0;
+                    var segment = _head;
 
-                return length;
+                    if (segment == null)
+                    {
+                        return _data.Count;
+                    }
+
+                    do
+                    {
+                        length += segment.Buffer.Count;
+                        segment = segment.Next;
+                    } while (segment != null);
+
+                    _length = length;
+                }
+
+                return _length.Value;
+            }
+        }
+
+        public byte this[int index]
+        {
+            get
+            {
+                var segment = _head;
+                if (segment == null)
+                {
+                    if (index >= _data.Count)
+                    {
+                        throw new IndexOutOfRangeException();
+                    }
+                    return _data.Array[_data.Offset + index];
+                }
+                else
+                {
+                    segment = FindSegment(segment, ref index);
+                    return segment[index];
+                }
             }
         }
 
@@ -46,6 +79,7 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
             _data = data;
             _head = null;
             _tail = null;
+            _length = null;
         }
 
         public ByteBuffer(BufferSegment head, BufferSegment tail)
@@ -53,6 +87,7 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
             _data = default(ArraySegment<byte>);
             _head = head;
             _tail = tail;
+            _length = null;
         }
 
         public int IndexOf(byte data)
@@ -117,7 +152,7 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
                 while (current != null)
                 {
                     // Check if this is the end
-                    if(current.Buffer.Count < length)
+                    if (current.Buffer.Count < length)
                     {
                         length -= current.Buffer.Count;
                         prev = current;
@@ -128,7 +163,7 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
                     {
                         // This is the end!
                         current = current.Slice(0, length);
-                        if(prev == null)
+                        if (prev == null)
                         {
                             // We stayed in the "starting" segment, so just replace the start segment with our newly sliced segment
                             start = current;
@@ -208,6 +243,40 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
                 }
             }
             return segment;
+        }
+
+        public static ByteBuffer Concat(ByteBuffer left, ByteBuffer right)
+        {
+            if(left.IsEmpty)
+            {
+                // Left is empty, just return right
+                return right;
+            }
+            else if(right.IsEmpty)
+            {
+                // Right is empty, just return left
+                return left;
+            }
+
+            var leftHead = left._head ?? new BufferSegment()
+            {
+                Buffer = left._data,
+                Next = null,
+                Owned = true
+            };
+
+            var rightHead = right._head ?? new BufferSegment()
+            {
+                Buffer = right._data,
+                Next = null,
+                Owned = true
+            };
+
+            var leftTail = left._tail ?? leftHead;
+            var rightTail = right._tail ?? rightHead;
+
+            leftTail.Next = rightHead;
+            return new ByteBuffer(leftHead, rightTail);
         }
 
         public Enumerator GetEnumerator()
@@ -298,12 +367,32 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
                 _buffer = buffer;
             }
 
-            [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
-            public string[] Buffers
+            public int BufferCount => Buffers.Length;
+            public int Length => _buffer.Length;
+            public BufferSegment[] Buffers
             {
                 get
                 {
-                    return _buffer.Select(a => "{" + string.Join(",", a) + "}").ToArray();
+                    var buffers = new List<BufferSegment>();
+                    if(_buffer._head == null)
+                    {
+                        buffers.Add(new BufferSegment()
+                        {
+                            Buffer = _buffer._data,
+                            Next = null,
+                            Owned = true
+                        });
+                    }
+                    else
+                    {
+                        var current = _buffer._head;
+                        while(current != null)
+                        {
+                            buffers.Add(current);
+                            current = current.Next;
+                        }
+                    }
+                    return buffers.ToArray();
                 }
             }
         }

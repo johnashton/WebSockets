@@ -1,7 +1,11 @@
 ﻿using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
 
 namespace Microsoft.AspNetCore.WebUtilities.Internal
 {
+    [DebuggerDisplay("{DebuggerDisplayContent,nq} (Owned={Owned})")]
     public class BufferSegment
     {
         public ArraySegment<byte> Buffer;
@@ -10,6 +14,28 @@ namespace Microsoft.AspNetCore.WebUtilities.Internal
         public BufferSegment Next;
 
         public int End => Buffer.Offset + Buffer.Count;
+
+        public byte this[int index]
+        {
+            get
+            {
+                if (index >= Buffer.Count)
+                {
+                    throw new IndexOutOfRangeException();
+                }
+                return Buffer.Array[Buffer.Offset + index];
+            }
+        }
+
+        private string DebuggerDisplayContent
+        {
+            get
+            {
+                var data = new byte[Buffer.Count];
+                Array.Copy(Buffer.Array, Buffer.Offset, data, 0, Buffer.Count);
+                return "{" + string.Join(",", data.Select(b => "0x" + b.ToString("X"))) + "} \"" + Encoding.UTF8.GetString(data) + "\"";
+            }
+        }
 
         /// <summary>
         /// Slice off the front of this segment, maintaining everything after 'offset', AND the remainder of the buffer chain

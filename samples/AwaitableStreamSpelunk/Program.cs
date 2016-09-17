@@ -1,8 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.WebUtilities.Internal;
+using Microsoft.Extensions.WebSockets.Internal;
 
 namespace AwaitableStreamSpelunk
 {
@@ -15,12 +18,19 @@ namespace AwaitableStreamSpelunk
         
         private static async Task AsyncMain(string[] args)
         {
+            const string Payload1 = "Hello, World";
+            var bytPayload1 = Encoding.UTF8.GetBytes(Payload1);
+            const string Payload2 = "Hello, again!";
+            var bytPayload2 = Encoding.UTF8.GetBytes(Payload2);
             var payloads = new[] {
-                new byte[] { 1, 2 },
-                new byte[] { 3, 4 },
-                new byte[] { 5, 6 },
-                new byte[] { 7, 8 },
-                new byte[] { 9, 10 },
+                new byte[] { 0x11 }, // FIN=1, Opcode=Text
+                new byte[] { (byte)(bytPayload1.Length << 1) },
+                bytPayload1.Take(bytPayload1.Length / 2).ToArray(),
+
+                // Send the second half of the payload along with an entire second message.
+                Enumerable.Concat(
+                    bytPayload1.Skip(bytPayload1.Length / 2),
+                    Enumerable.Concat(new byte[] { 0x11, (byte)(bytPayload2.Length << 1) }, bytPayload2)).ToArray()
             };
             var s = new AwaitableStream();
             var writes = Task.Run(async () => {
@@ -30,17 +40,11 @@ namespace AwaitableStreamSpelunk
                 }
             });
 
-            // Start the process
-            ByteBuffer buf = default(ByteBuffer);
-            foreach (var payload in payloads)
-            {
-                s.Consumed(0);
-                buf = await s.ReadAsync();
-            }
-
-            // What have we got
-            Console.WriteLine("Slice(2, 5): " + string.Join(",", buf.Slice(2, 5).GetArraySegment()));
-            Console.WriteLine("Slice(3): " + string.Join(",", buf.Slice(3).GetArraySegment()));
+            var socket = new WebSocketConnection(s, "foo");
+            var message = await socket.ReceiveAsync(CancellationToken.None);
+            Console.WriteLine($"Message Received: {message.Opcode} (FIN={message.EndOfMessage}): {Encoding.UTF8.GetString(message.Payload.Array, message.Payload.Offset, message.Payload.Count)}");
+            message = await socket.ReceiveAsync(CancellationToken.None);
+            Console.WriteLine($"Message Received: {message.Opcode} (FIN={message.EndOfMessage}): {Encoding.UTF8.GetString(message.Payload.Array, message.Payload.Offset, message.Payload.Count)}");
         }
     }
 }
