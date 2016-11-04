@@ -37,6 +37,10 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "ManagedSockets"
       }
+    },
+    "Docker": {
+      "launchBrowser": true,
+      "launchUrl": "http://localhost:{ServicePort}"
     }
   }
 }

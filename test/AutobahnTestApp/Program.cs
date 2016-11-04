@@ -15,6 +15,7 @@ namespace AutobahnTestApp
 
             var builder = new WebHostBuilder()
                 .UseConfiguration(config)
+                .UseUrls("http://localhost:5000", "https://localhost:5443")
                 .UseContentRoot(Directory.GetCurrentDirectory())
                 .UseIISIntegration()
                 .UseStartup<Startup>();

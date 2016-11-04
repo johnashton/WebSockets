@@ -28,7 +28,8 @@
     "emitEntryPoint": true,
     "copyToOutput": [
       "TestResources/testCert.pfx"
-    ]
+    ],
+    "debugType": "portable"
   },
   "runtimeOptions": {
     "configProperties": {

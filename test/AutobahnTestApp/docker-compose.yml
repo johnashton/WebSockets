@@ -1,0 +1,10 @@
+version: '2'
+
+services:
+  autobahntestapp:
+    image: user/autobahntestapp${TAG}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "80"
